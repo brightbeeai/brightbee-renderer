@@ -15,6 +15,16 @@ app.post("/render", async (req, res) => {
 
   try {
 
+    console.log("=== START RENDER ===");
+
+    const renderId = req.body.renderId;
+    const audioUrl = req.body.audioUrl;
+    const timeline = req.body.timeline;
+
+    console.log("renderId =", renderId);
+    console.log("audioUrl =", audioUrl);
+    console.log("timeline =", timeline);
+
     const renderId = req.body.renderId;
     const audioUrl = req.body.audioUrl;
     const timeline = req.body.timeline;
@@ -78,14 +88,17 @@ app.post("/render", async (req, res) => {
       output: finalVideo
     });
 
-  } catch (e) {
+  catch (e) {
 
-    res.status(500).json({
-      success: false,
-      error: e.message
-    });
+  console.error("ERROR:");
+  console.error(e);
 
-  }
+  res.status(500).json({
+    success:false,
+    error:e.message
+  });
+
+}
 
 });
 
