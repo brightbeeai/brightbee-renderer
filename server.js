@@ -5,7 +5,7 @@ const { exec } = require("child_process");
 
 const app = express();
 
-app.use(express.json({ limit: "50mb" }));
+app.use(express.json({ limit: "100mb" }));
 
 app.get("/", (req, res) => {
 res.json({
@@ -14,55 +14,97 @@ status: "renderer online"
 });
 
 app.post("/render", async (req, res) => {
+
+let workDir = null;
+
 try {
 
 ```
-console.log("==== RENDER REQUEST RECEIVED ====");
+const {
+  renderId,
+  audioUrl,
+  timeline
+} = req.body;
 
-const renderId = req.body.renderId;
-const audioUrl = req.body.audioUrl;
-const timeline = req.body.timeline || [];
+if (
+  !renderId ||
+  !audioUrl ||
+  !timeline ||
+  !timeline.length
+) {
+  return res.status(400).json({
+    success: false,
+    error: "Missing renderId, audioUrl or timeline"
+  });
+}
 
-console.log("Render ID:", renderId);
-console.log("Audio URL:", audioUrl);
-console.log("Timeline Items:", timeline.length);
-
-const workDir = `/tmp/${renderId}`;
+workDir = `/tmp/${renderId}`;
 
 await fs.ensureDir(workDir);
 
-let list = "";
+console.log("Starting render:", renderId);
 
-for (let i = 0; i < timeline.length; i++) {
+const clipPaths = await Promise.all(
 
-  console.log(`Downloading clip ${i}`);
+  timeline.map(async (item, index) => {
 
-  const clipPath = `${workDir}/clip${i}.mp4`;
+    const rawClip =
+      `${workDir}/raw_${index}.mp4`;
 
-  const video = await axios.get(
-    timeline[i].url,
-    {
-      responseType: "arraybuffer",
-      timeout: 120000
-    }
-  );
+    console.log(`Downloading clip ${index}`);
 
-  await fs.writeFile(
-    clipPath,
-    video.data
-  );
+    const response = await axios.get(
+      item.url,
+      {
+        responseType: "arraybuffer",
+        timeout: 120000
+      }
+    );
 
-  list += `file '${clipPath}'\n`;
-}
+    await fs.writeFile(
+      rawClip,
+      response.data
+    );
 
-await fs.writeFile(
-  `${workDir}/list.txt`,
-  list
+    const normalizedClip =
+      `${workDir}/clip_${index}.mp4`;
+
+    await run(
+      `ffmpeg -y \
+      -i "${rawClip}" \
+      -vf "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2" \
+      -r 30 \
+      -c:v libx264 \
+      -preset veryfast \
+      -crf 23 \
+      -c:a aac \
+      "${normalizedClip}"`
+    );
+
+    return normalizedClip;
+
+  })
+
 );
 
-console.log("Video list created");
+let concatList = "";
 
-const audioPath = `${workDir}/audio.mp3`;
+clipPaths.forEach((file) => {
+  concatList += `file '${file}'\n`;
+});
+
+const listFile =
+  `${workDir}/list.txt`;
+
+await fs.writeFile(
+  listFile,
+  concatList
+);
+
+console.log("Downloading audio");
+
+const audioPath =
+  `${workDir}/audio.mp3`;
 
 const audio = await axios.get(
   audioUrl,
@@ -77,23 +119,39 @@ await fs.writeFile(
   audio.data
 );
 
-console.log("Audio downloaded");
+const mergedVideo =
+  `${workDir}/merged.mp4`;
 
-const merged = `${workDir}/merged.mp4`;
-
-await run(
-  `ffmpeg -f concat -safe 0 -i ${workDir}/list.txt -c copy ${merged}`
-);
-
-console.log("Merged clips");
-
-const finalVideo = `${workDir}/final.mp4`;
+console.log("Merging clips");
 
 await run(
-  `ffmpeg -i ${merged} -i ${audioPath} -c:v copy -c:a aac -shortest ${finalVideo}`
+  `ffmpeg -y \
+  -f concat \
+  -safe 0 \
+  -i "${listFile}" \
+  -c:v libx264 \
+  -preset veryfast \
+  -crf 23 \
+  -c:a aac \
+  "${mergedVideo}"`
 );
 
-console.log("Final video created");
+const finalVideo =
+  `${workDir}/final.mp4`;
+
+console.log("Adding audio");
+
+await run(
+  `ffmpeg -y \
+  -i "${mergedVideo}" \
+  -i "${audioPath}" \
+  -map 0:v \
+  -map 1:a \
+  -c:v copy \
+  -c:a aac \
+  -shortest \
+  "${finalVideo}"`
+);
 
 res.json({
   success: true,
@@ -101,50 +159,100 @@ res.json({
   status: "completed",
   output: finalVideo
 });
+
+setTimeout(async () => {
+
+  try {
+
+    await fs.remove(workDir);
+
+    console.log(
+      "Temporary files removed:",
+      workDir
+    );
+
+  } catch (e) {
+
+    console.error(e);
+
+  }
+
+}, 60 * 60 * 1000);
 ```
 
 } catch (e) {
 
 ```
-console.error("RENDER ERROR:");
+console.error("RENDER ERROR");
 console.error(e);
+
+if (workDir) {
+
+  try {
+
+    await fs.remove(workDir);
+
+  } catch (_) {}
+
+}
 
 res.status(500).json({
   success: false,
-  error: e.toString()
+  error: String(e)
 });
 ```
 
 }
+
 });
 
 function run(cmd) {
-return new Promise((resolve, reject) => {
+
+return new Promise(
+(resolve, reject) => {
 
 ```
-console.log("RUNNING:", cmd);
+  exec(
+    cmd,
+    {
+      maxBuffer:
+        1024 * 1024 * 100
+    },
+    (
+      err,
+      stdout,
+      stderr
+    ) => {
 
-exec(
-  cmd,
-  { maxBuffer: 1024 * 1024 * 20 },
-  (err, stdout, stderr) => {
+      if (err) {
 
-    if (err) {
-      console.error(stderr);
-      reject(stderr);
-    } else {
-      resolve(stdout);
+        console.error(stderr);
+
+        reject(stderr);
+
+      } else {
+
+        resolve(stdout);
+
+      }
+
     }
+  );
 
-  }
-);
+}
 ```
 
-});
+);
+
 }
 
-const PORT = process.env.PORT || 8080;
+const PORT =
+process.env.PORT || 8080;
 
 app.listen(PORT, () => {
-console.log(`Renderer running on ${PORT}`);
+
+console.log(
+`Renderer running on ${PORT}`
+);
+
 });
